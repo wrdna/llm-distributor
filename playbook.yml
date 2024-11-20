@@ -1,0 +1,42 @@
+---
+- name: Deploy llama.cpp RPC server and models
+  hosts: all
+
+  vars:
+    master_model_path: "/home/{{ master_user }}/dev/ncs-cluster/models"
+    target_model_path: "/home/{{ ansible_user }}/cluster/models"
+  tasks:
+    - name: Install required deps
+      apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+
+    - name: Create model folder @ {{ target_model_path }}
+      file:
+        path: "{{ target_model_path }}"
+        state: directory
+
+    - name: Sync models from master
+      synchronize:
+        src: "{{ master_model_path }}/"
+        dest: "{{ target_model_path }}/"
+        recursive: true
+      delegate_to: localhost
+
+    - name: Create docker-compose.yml on target
+      copy:
+        src: ./docker-compose.yml
+        dest: /home/{{ ansible_user }}/cluster/docker-compose.yml
+        mode: '0644'
+
+    - name: Update compose file with model path
+      lineinfile:
+        path: /home/{{ ansible_user }}/cluster/docker-compose.yml
+        regexp: "^volumes:"
+        line: "      - {{ target_model_path }}:/cluster/models"
+        insertbefore: "^\\s*environment:"
+
+    - name: StartRPC server container
+      command: docker compose -f /home/{{ ansible_user }}/cluster/docker-compose.yml up -d 
