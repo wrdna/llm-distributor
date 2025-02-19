@@ -1,16 +1,27 @@
 ---
-- name: Deploy llama.cpp RPC server and models
-  hosts: all
+- name: Set up rpc-server for llama.cpp with CUDA and cuDNN
+  hosts: workers
+  become: true
 
   vars:
-    master_model_path: "/home/{{ master_user }}/dev/ncs-cluster/models"
-    target_model_path: "/home/{{ ansible_user }}/cluster/models"
+    master_dir: "/home/{{ master_user }}/dev/ncs-cluster/"
+    target_dir:  "/home/{{ ansible_user }}/cluster/"
+    master_model_path: "{{ master_dir }}/models"
+    target_model_path: "{{ target_dir }}/models"
+    docker_image_name: "llama-rpc-server"
+    dockerfile_src:  "{{ master_dir }}/Dockerfile" # Path to Dockerfile on the master
+    dockerfile_dest: "{{ target_dir }}/Dockerfile"
+    docker_compose_src: "{{ master_dir }}/docker-compose.yml"
+    docker_compose_dest: "{{ target_dir }}/docker-compose.yml"
+
   tasks:
-    - name: Install required deps
+    - name: Install required dependencies
       apt:
         name:
           - docker.io
           - docker-compose-v2
+          - wget
+          - build-essential
         state: present
 
     - name: Create model folder @ {{ target_model_path }}
@@ -18,25 +29,42 @@
         path: "{{ target_model_path }}"
         state: directory
 
-    - name: Sync models from master
+    - name: Sync models from master to workers
       synchronize:
         src: "{{ master_model_path }}/"
         dest: "{{ target_model_path }}/"
         recursive: true
       delegate_to: localhost
 
-    - name: Create docker-compose.yml on target
+    - name: Pre-build Docker image on the master
+      command: docker build -t {{ docker_image_name }} -f "{{ dockerfile_src }}" "{{ master_dir }}"
+      delegate_to: localhost
+      register: build_output
+      failed_when: build_output.rc != 0
+
+    - name: Save Docker image as tarball on the master
+      command: docker save -o /tmp/{{ docker_image_name }}.tar {{ docker_image_name }}
+      delegate_to: localhost
+
+    - name: Transfer Docker image tarball to worker nodes
       copy:
-        src: ./docker-compose.yml
-        dest: /home/{{ ansible_user }}/cluster/docker-compose.yml
+        src: /tmp/{{ docker_image_name }}.tar
+        dest: /tmp/{{ docker_image_name }}.tar
+
+    - name: Load Docker image on worker nodes
+      command: docker load < /tmp/{{ docker_image_name }}.tar
+
+    - name: Create Docker Compose file on target
+      copy:
+        src: "{{ docker_compose_src }}"
+        dest: "{{ docker_compose_dest }}"
         mode: '0644'
 
-    - name: Update compose file with model path
-      lineinfile:
-        path: /home/{{ ansible_user }}/cluster/docker-compose.yml
-        regexp: "^volumes:"
-        line: "      - {{ target_model_path }}:/cluster/models"
-        insertbefore: "^\\s*environment:"
+    - name: Start RPC server container using Docker Compose
+      command: docker compose -f "{{ docker_compose_dest }}" up -d
 
-    - name: StartRPC server container
-      command: docker compose -f /home/{{ ansible_user }}/cluster/docker-compose.yml up -d 
+    - name: Verify that the RPC server container is running
+      shell: docker ps | grep "{{ docker_image_name }}"
+      register: container_status
+      failed_when: container_status.rc != 0
+
